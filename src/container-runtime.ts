@@ -62,41 +62,86 @@ export function stopContainer(name: string): string {
   return `${CONTAINER_RUNTIME_BIN} stop ${name}`;
 }
 
-/** Ensure the container runtime is running, starting it if needed. */
+/** Maximum time to wait for the container runtime to become available (ms). */
+const RUNTIME_WAIT_TIMEOUT = 120_000;
+
+/** Initial retry interval when waiting for the container runtime (ms). */
+const RUNTIME_RETRY_INITIAL = 2_000;
+
+/** Maximum retry interval (ms). */
+const RUNTIME_RETRY_MAX = 10_000;
+
+/** Exported for test mocking only. */
+export const _internal = {
+  sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  },
+};
+
+/**
+ * Ensure the container runtime is running, waiting with backoff if it's not
+ * available yet (e.g. Docker Desktop still starting after a reboot).
+ */
 export function ensureContainerRuntimeRunning(): void {
-  try {
-    execSync(`${CONTAINER_RUNTIME_BIN} info`, {
-      stdio: 'pipe',
-      timeout: 10000,
-    });
-    logger.debug('Container runtime already running');
-  } catch (err) {
-    logger.error({ err }, 'Failed to reach container runtime');
-    console.error(
-      '\n╔════════════════════════════════════════════════════════════════╗',
-    );
-    console.error(
-      '║  FATAL: Container runtime failed to start                      ║',
-    );
-    console.error(
-      '║                                                                ║',
-    );
-    console.error(
-      '║  Agents cannot run without a container runtime. To fix:        ║',
-    );
-    console.error(
-      '║  1. Ensure Docker is installed and running                     ║',
-    );
-    console.error(
-      '║  2. Run: docker info                                           ║',
-    );
-    console.error(
-      '║  3. Restart NanoClaw                                           ║',
-    );
-    console.error(
-      '╚════════════════════════════════════════════════════════════════╝\n',
-    );
-    throw new Error('Container runtime is required but failed to start');
+  const deadline = Date.now() + RUNTIME_WAIT_TIMEOUT;
+  let delay = RUNTIME_RETRY_INITIAL;
+  let attempt = 0;
+
+  while (true) {
+    try {
+      execSync(`${CONTAINER_RUNTIME_BIN} info`, {
+        stdio: 'pipe',
+        timeout: 10000,
+      });
+      if (attempt > 0) {
+        logger.info(
+          { attempts: attempt + 1 },
+          'Container runtime is now available',
+        );
+      } else {
+        logger.debug('Container runtime already running');
+      }
+      return;
+    } catch (err) {
+      attempt++;
+      if (Date.now() >= deadline) {
+        logger.error(
+          { err, attempts: attempt },
+          'Failed to reach container runtime after timeout',
+        );
+        console.error(
+          '\n╔════════════════════════════════════════════════════════════════╗',
+        );
+        console.error(
+          '║  FATAL: Container runtime failed to start                      ║',
+        );
+        console.error(
+          '║                                                                ║',
+        );
+        console.error(
+          '║  Agents cannot run without a container runtime. To fix:        ║',
+        );
+        console.error(
+          '║  1. Ensure Docker is installed and running                     ║',
+        );
+        console.error(
+          '║  2. Run: docker info                                           ║',
+        );
+        console.error(
+          '║  3. Restart NanoClaw                                           ║',
+        );
+        console.error(
+          '╚════════════════════════════════════════════════════════════════╝\n',
+        );
+        throw new Error('Container runtime is required but failed to start');
+      }
+      logger.info(
+        { attempt, retryInMs: delay },
+        'Container runtime not ready, waiting...',
+      );
+      _internal.sleepSync(delay);
+      delay = Math.min(delay * 1.5, RUNTIME_RETRY_MAX);
+    }
   }
 }
 

@@ -22,6 +22,7 @@ import {
   stopContainer,
   ensureContainerRuntimeRunning,
   cleanupOrphans,
+  _internal,
 } from './container-runtime.js';
 import { logger } from './logger.js';
 
@@ -64,8 +65,43 @@ describe('ensureContainerRuntimeRunning', () => {
     );
   });
 
-  it('throws when docker info fails', () => {
-    mockExecSync.mockImplementationOnce(() => {
+  it('retries and succeeds when runtime becomes available', () => {
+    vi.spyOn(_internal, 'sleepSync').mockImplementation(() => {});
+
+    // Fail twice, then succeed
+    mockExecSync
+      .mockImplementationOnce(() => {
+        throw new Error('Cannot connect');
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('Cannot connect');
+      })
+      .mockReturnValueOnce('');
+
+    ensureContainerRuntimeRunning();
+
+    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    expect(_internal.sleepSync).toHaveBeenCalledTimes(2);
+    expect(logger.info).toHaveBeenCalledWith(
+      { attempts: 3 },
+      'Container runtime is now available',
+    );
+
+    vi.restoreAllMocks();
+  });
+
+  it('throws after timeout when docker never starts', () => {
+    // Always fail — use vi.spyOn(Date, 'now') to simulate timeout
+    let callCount = 0;
+    const realNow = Date.now;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      callCount++;
+      // First call sets the deadline, subsequent calls simulate time passing
+      if (callCount <= 1) return realNow();
+      return realNow() + 200_000; // well past 120s timeout
+    });
+
+    mockExecSync.mockImplementation(() => {
       throw new Error('Cannot connect to the Docker daemon');
     });
 
@@ -73,6 +109,8 @@ describe('ensureContainerRuntimeRunning', () => {
       'Container runtime is required but failed to start',
     );
     expect(logger.error).toHaveBeenCalled();
+
+    vi.restoreAllMocks();
   });
 });
 
